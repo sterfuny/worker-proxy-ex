@@ -52,6 +52,19 @@
 
 ![6](img/depoly/cf/6.png)
 
+---
+
+## 子域名模式（本版本必需）
+
+本版本通过 `目标host-p.你的域名` 的形式访问（如 `github-com-p.xxx.com`），部署时需要：
+
+1. 把 `_worker.js` 顶部的 `const proxyBaseDomain = "xxx.com";` 改成你的域名。
+2. 在 DNS 里添加泛解析记录 `*`（以及裸域 `@`），并开启 Cloudflare 代理（橙云）。
+3. 在 Worker 的 Triggers 里添加路由 `*.你的域名/*` 和 `你的域名/*`（或用 wrangler.jsonc 中注释掉的 routes 示例）。
+   * 注意：Workers 的「Custom Domain」不支持泛域名，这里必须用 **Routes**。
+4. Cloudflare 的免费 Universal SSL 自带 `*.你的域名` 一级泛域名证书，无需额外申请；目标 host 被编码成单级子域名正是为了兼容这张证书。
+5. 密码 Cookie 会种在裸域上，所有代理子域名共享；各目标网站的 Cookie 按子域名相互隔离。
+
 
 > [!TIP]
 > 如果你选择不开启安全密码，那么你可以转到 Website -> Security -> Bots -> 开启所有防护（Bot Fight Mode + Block AI bots）

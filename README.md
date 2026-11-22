@@ -38,8 +38,14 @@ https://y.demo.lhyang.org/https://www.google.com/maps
 
 
 # 用法
-* 请先根据 [快速开始](#快速开始) 进行部署
-* 在任意网址前面加上 `https://你的域名/` <br>例如 `https://你的域名/https://github.com`
+* 请先根据 [快速开始](#快速开始) 进行部署（本子域名版本需要先把 `_worker.js` 里的 `proxyBaseDomain` 改成你的域名，并配置泛解析）
+* 访问形式：`https://目标host-p.你的域名/路径`，其中目标 host 的 `.` 写成 `-`，原有的 `-` 写成 `--`
+  * 例如 `https://github.com/abc` → `https://github-com-p.xxx.com/abc`
+  * `https://my-site.com/` → `https://my--site-com-p.xxx.com/`
+  * http 网站用 `-ph` 后缀：`http://example.com` → `http://example-com-ph.xxx.com`
+  * 非默认端口用 `---端口`：`https://example.com:8443` → `https://example-com---8443-p.xxx.com`
+* 也可以直接打开 `https://你的域名/`，在首页输入框输入网址自动跳转
+* 旧的路径式链接 `https://你的域名/https://github.com` 会自动 301 跳转到新的子域名形式
 * [使用技巧](https://github.com/1234567Yang/cf-proxy-ex/blob/main/usage_tips.md)
 
 
@@ -51,6 +57,11 @@ https://y.demo.lhyang.org/https://www.google.com/maps
 
 * [在Deno上部署](https://github.com/1234567Yang/cf-proxy-ex/blob/main/deploy_on_deno_tutorial.md)
 * [在Cloudflare上部署](https://github.com/1234567Yang/cf-proxy-ex/blob/main/deploy_on_cf_tutorial.md)
+* **子域名模式必做配置**（本版本改为 `目标host-p.你的域名` 形式访问）：
+  1. 修改 `_worker.js` 顶部的 `const proxyBaseDomain = "xxx.com";` 为你的域名
+  2. DNS 添加泛解析记录 `*`（以及裸域 `@`）指向 Worker，Cloudflare 上需开启橙云代理
+  3. Worker 绑定路由 `*.你的域名/*` 和 `你的域名/*`（wrangler.jsonc 中有示例），确保 `*.你的域名` 的 TLS 证书可用（Cloudflare 免费 Universal SSL 自带一级泛域名证书）
+  4. 由于目标 host 编码为**单级**子域名，`*.域名` 的泛证书即可覆盖；注意 DNS 单个 label 上限 63 字符，超长域名无法编码
 * 自定义域名获取（可选但建议，更稳定）：
   * 域名购买：
     * https://porkbun.com/

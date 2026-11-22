@@ -1,4 +1,11 @@
 {
   "main": "_worker.js",
-  "compatibility_date": "2025-07-13"
+  "compatibility_date": "2025-07-13",
+  // 子域名模式需要泛域名路由：把 xxx.com 全部替换成你的域名后取消注释
+  // 同时需要：1) _worker.js 中的 proxyBaseDomain 改成你的域名
+  //          2) DNS 添加泛解析记录 *（以及裸域 @），并开启 Cloudflare 代理（橙云）
+  // "routes": [
+  //   { "pattern": "*.xxx.com/*", "zone_name": "xxx.com" },
+  //   { "pattern": "xxx.com/*", "zone_name": "xxx.com" }
+  // ]
 }

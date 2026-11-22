@@ -12,8 +12,7 @@
   * `For English user, I suggest to search Website name + "镜像站" (i.g. Youtube镜像站), and translate the result into English, because it is easier to find mirror sites via this way for some sort of reasons`
 * 对于一些弹人机验证的网站，同样可以找镜像站
 * Google如果不可用可以使用 Duckduckgo 或 Bing
-* 如果在使用搜索引擎的时候，点击搜索出现 `Something is wrong while trying to get your cookie` 字样，请确认浏览器是否开启了 Cookie 。
-  * 如果无法开启 Cookie 或者开启了 Cookie 还是出现这个问题，可以使用以下格式直跳搜索：
+* 子域名模式下，搜索引擎的站内跳转/相对链接可以直接工作；如果仍遇到跳转异常，可以使用以下格式直跳搜索（在首页输入框输入即可）：
   * `https://duckduckgo.com/?q=【你要搜索的内容 What do you want to search】`
   * `https://bing.com/search?q=【你要搜索的内容 What do you want to search】`
 * Github/其它网站的搜索如果不可用（Rate limited），可以使用搜索引擎搜索`你要的内容 site:哪个网址`。如：`Powertoys site:github.com`

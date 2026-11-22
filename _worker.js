@@ -7,16 +7,104 @@ export default {
     }
 }
 
-const str = "/";
-const lastVisitProxyCookie = "__PROXY_VISITEDSITE__";
 const passwordCookieName = "__PROXY_PWD__";
 const proxyHintCookieName = "__PROXY_HINT__";
 const password = "009178";
 const showPasswordPage = true;
 const replaceUrlObj = "__location__yproxy__";
 
+// =======================================================================================
+// 子域名模式配置：访问形式为 <编码后的目标host>-p.<proxyBaseDomain>
+// 例如 https://github-com-p.xxx.com/abc  =>  https://github.com/abc
+// 编码规则（可逆）：host 中的 "-" 写成 "--"，"." 写成 "-"
+//   - https 目标用后缀 "-p"，http 目标用后缀 "-ph"
+//   - 非默认端口追加 "---<端口>"，如 my-site.com:8080 => my--site-com---8080-p.xxx.com
+// 部署需要：1) 把 proxyBaseDomain 改成你的域名
+//          2) DNS 添加泛解析 *.xxx.com（以及裸域 xxx.com）指向 Worker
+//          3) Worker 绑定路由 *.xxx.com/* 和 xxx.com/*（证书需覆盖 *.xxx.com）
+// =======================================================================================
+const proxyBaseDomain = "xxx.com"; // TODO: 改成你自己的域名
+const proxySuffixHttps = "-p";
+const proxySuffixHttp = "-ph";
+
 var thisProxyServerUrlHttps;
 var thisProxyServerUrl_hostOnly;
+
+// host（可带端口）编码为单级 DNS label
+function encodeHostToLabel(host) {
+  let hostname = host, port = "";
+  const i = host.lastIndexOf(":");
+  if (i !== -1) { hostname = host.substring(0, i); port = host.substring(i + 1); }
+  let label = hostname.replaceAll("-", "--").replaceAll(".", "-");
+  if (port !== "") label += "---" + port;
+  return label;
+}
+
+// DNS label 解码回 host（可带端口）
+// 合法域名中 "-" 不会与 "." 相邻，所以编码后的连续 "-" 段：长度1=点，偶数=原样连字符，长度3=端口分隔符
+function decodeLabelToHost(label) {
+  let out = "", i = 0, port = null;
+  while (i < label.length) {
+    if (label[i] === "-") {
+      let j = i;
+      while (j < label.length && label[j] === "-") j++;
+      const run = j - i;
+      if (run === 1) out += ".";
+      else if (run === 3) { port = label.substring(j); break; }
+      else if (run % 2 === 0) out += "-".repeat(run / 2);
+      else throw new Error("Invalid proxy subdomain label: " + label);
+      i = j;
+    } else { out += label[i]; i++; }
+  }
+  if (port !== null) {
+    if (!/^\d+$/.test(port)) throw new Error("Invalid port in proxy label: " + label);
+    out += ":" + port;
+  }
+  return out;
+}
+
+// 解析代理子域名，返回 { protocol, host }；不是代理子域名则返回 null
+function parseProxyHostname(hostname) {
+  hostname = hostname.toLowerCase();
+  if (!hostname.endsWith("." + proxyBaseDomain)) return null;
+  const label = hostname.substring(0, hostname.length - proxyBaseDomain.length - 1);
+  if (label === "" || label.includes(".")) return null; // 泛解析只支持单级 label
+  let protocol = "https:", encoded = label;
+  if (label.endsWith(proxySuffixHttp)) {
+    protocol = "http:";
+    encoded = label.substring(0, label.length - proxySuffixHttp.length);
+  } else if (label.endsWith(proxySuffixHttps)) {
+    encoded = label.substring(0, label.length - proxySuffixHttps.length);
+  } else return null;
+  try {
+    const host = decodeLabelToHost(encoded);
+    if (!host.includes(".")) return null;
+    return { protocol: protocol, host: host };
+  } catch { return null; }
+}
+
+// 把目标绝对 URL 转换为代理子域名 URL；proxyProtocol 是当前代理请求的协议
+function toProxyUrl(u, proxyProtocol) {
+  const urlObj = (u instanceof URL) ? u : new URL(u);
+  if (urlObj.hostname === proxyBaseDomain || urlObj.hostname.endsWith("." + proxyBaseDomain)) return urlObj.href; // 已经是代理地址
+  let host = urlObj.hostname;
+  if (urlObj.port !== "") host += ":" + urlObj.port;
+  const suffix = (urlObj.protocol === "http:") ? proxySuffixHttp : proxySuffixHttps;
+  return `${proxyProtocol}//${encodeHostToLabel(host)}${suffix}.${proxyBaseDomain}${urlObj.pathname}${urlObj.search}${urlObj.hash}`;
+}
+
+// 把文本中出现的所有代理子域名 origin 还原为真实目标 origin（用于 Header / 请求 Body）
+const proxyOriginRegex = new RegExp(`https?://[a-z0-9-]+\\.${proxyBaseDomain.replaceAll(".", "\\.")}`, "gi");
+function restoreProxyUrlsInText(text) {
+  return text.replace(proxyOriginRegex, (match) => {
+    try {
+      const u = new URL(match);
+      const info = parseProxyHostname(u.hostname);
+      if (!info) return match;
+      return info.protocol + "//" + info.host;
+    } catch { return match; }
+  });
+}
 // const CSSReplace = ["https://", "http://"];
 const proxyHintInjection = `
 
@@ -54,29 +142,81 @@ alert(hint + "https://github.com/1234567Yang/cf-proxy-ex");
 const httpRequestInjection = `
 
 //---***========================================***---information---***========================================***---
-var nowURL = new URL(window.location.href);
-var proxy_host = nowURL.host; //代理的host - proxy.com
-var proxy_protocol = nowURL.protocol; //代理的protocol
-var proxy_host_with_schema = proxy_protocol + "//" + proxy_host + "/"; //代理前缀 https://proxy.com/
+var proxy_host = window.location.host; //当前代理子域名 host - github-com-p.xxx.com
+var proxy_protocol = window.location.protocol; //代理的protocol
+var proxy_host_with_schema = proxy_protocol + "//" + proxy_host + "/"; //当前代理 origin
+var proxyBaseDomain = "${proxyBaseDomain}";
+var proxySuffixHttps = "${proxySuffixHttps}";
+var proxySuffixHttp = "${proxySuffixHttp}";
 
+// host（可带端口）编码为单级 DNS label："-" 写成 "--"，"." 写成 "-"，端口用 "---<端口>"
+function encodeHostToLabel(host) {
+    var hostname = host, port = "";
+    var i = host.lastIndexOf(":");
+    if (i !== -1) { hostname = host.substring(0, i); port = host.substring(i + 1); }
+    var label = hostname.split("-").join("--").split(".").join("-");
+    if (port !== "") label += "---" + port;
+    return label;
+}
 
+function decodeLabelToHost(label) {
+    var out = "", i = 0, port = null;
+    while (i < label.length) {
+        if (label[i] === "-") {
+            var j = i;
+            while (j < label.length && label[j] === "-") j++;
+            var run = j - i;
+            if (run === 1) out += ".";
+            else if (run === 3) { port = label.substring(j); break; }
+            else if (run % 2 === 0) out += "-".repeat(run / 2);
+            else throw new Error("Invalid proxy subdomain label: " + label);
+            i = j;
+        } else { out += label[i]; i++; }
+    }
+    if (port !== null) {
+        if (!/^[0-9]+$/.test(port)) throw new Error("Invalid port in proxy label: " + label);
+        out += ":" + port;
+    }
+    return out;
+}
 
+// 解析子域名第一段（如 github-com-p），返回 { protocol, host } 或 null
+function parseProxyLabel(label) {
+    var protocol = "https:", encoded = label;
+    if (label.endsWith(proxySuffixHttp)) {
+        protocol = "http:";
+        encoded = label.substring(0, label.length - proxySuffixHttp.length);
+    } else if (label.endsWith(proxySuffixHttps)) {
+        encoded = label.substring(0, label.length - proxySuffixHttps.length);
+    } else return null;
+    try {
+        var host = decodeLabelToHost(encoded);
+        if (!host.includes(".")) return null;
+        return { protocol: protocol, host: host };
+    } catch (e) { return null; }
+}
 
-// 每次都要动态计算。比如某个网站把 #1 -> #2 然后 JS 调用。如果静态计算的话就还是会是 # 1
+var __proxyTargetInfo = parseProxyLabel(window.location.hostname.split(".")[0]);
 
-// var original_website_url_str = window.location.href.substring(proxy_host_with_schema.length); //被代理的【完整】地址 如：https://example.com/1?q#1
-// var original_website_url = new URL(original_website_url_str);
+// 把目标绝对 URL 转换为代理子域名 URL
+function makeProxyUrl(absoluteUrlStr) {
+    try {
+        var u = new URL(absoluteUrlStr);
+        if (u.protocol !== "http:" && u.protocol !== "https:") return absoluteUrlStr;
+        if (u.hostname === proxyBaseDomain || u.hostname.endsWith("." + proxyBaseDomain)) return u.href; // 已经是代理地址
+        var host = u.hostname + (u.port !== "" ? ":" + u.port : "");
+        var suffix = (u.protocol === "http:") ? proxySuffixHttp : proxySuffixHttps;
+        return proxy_protocol + "//" + encodeHostToLabel(host) + suffix + "." + proxyBaseDomain + u.pathname + u.search + u.hash;
+    } catch (e) {
+        return absoluteUrlStr;
+    }
+}
 
-// var original_website_host = original_website_url_str.substring(original_website_url_str.indexOf("://") + "://".length);
-// original_website_host = original_website_host.split('/')[0]; //被代理的Host proxied_website.com
-
-// var original_website_host_with_schema = original_website_url_str.substring(0, original_website_url_str.indexOf("://")) + "://" + original_website_host + "/"; //加上https的被代理的host， https://proxied_website.com/
-
-
-//被代理的【完整】地址 如：https://example.com/1?q#1
+// 每次都要动态计算（history.pushState 会改变 path）。被代理的【完整】地址 如：https://example.com/1?q#1
 Object.defineProperty(window, 'original_website_url_str', {
     get: function() {
-        return window.location.href.substring(proxy_host_with_schema.length);
+        var loc = window.location;
+        return __proxyTargetInfo.protocol + "//" + __proxyTargetInfo.host + loc.pathname + loc.search + loc.hash;
     }
 });
 
@@ -86,18 +226,17 @@ Object.defineProperty(window, 'original_website_url', {
     }
 });
 
-//被代理的Host proxied_website.com
+//被代理的Host proxied_website.com（含端口）
 Object.defineProperty(window, 'original_website_host', {
     get: function() {
-        var h = original_website_url_str.substring(original_website_url_str.indexOf("://") + "://".length);
-        return h.split('/')[0];
+        return original_website_url.host;
     }
 });
 
 //加上https的被代理的host， https://proxied_website.com/
 Object.defineProperty(window, 'original_website_host_with_schema', {
     get: function() {
-        return original_website_url_str.substring(0, original_website_url_str.indexOf("://")) + "://" + original_website_host + "/";
+        return original_website_url.protocol + "//" + original_website_url.host + "/";
     }
 });
 
@@ -126,43 +265,44 @@ function changeURL(relativePath) {
     }
 
 
-    // for example, blob:https://example.com/, we need to remove blob and add it back later
-    var pathAfterAdd = "";
-
+    // blob: URL 只在其创建 origin 内有效：
+    // - 指向代理子域名的 blob 原样保留；指向真实网站的 blob 转换 origin 为对应代理子域名
     if (relativePath_str.startsWith("blob:")) {
-        pathAfterAdd = "blob:";
-        relativePath_str = relativePath_str.substring("blob:".length);
+        try {
+            var innerUrl = new URL(relativePath_str.substring("blob:".length));
+            if (innerUrl.hostname === proxyBaseDomain || innerUrl.hostname.endsWith("." + proxyBaseDomain)) return relativePath_str;
+            return "blob:" + makeProxyUrl(innerUrl.href);
+        } catch {
+            return relativePath_str;
+        }
     }
 
 
     try {
-        // 把relativePath去除掉当前代理的地址 https://proxy.com/ ， relative path成为 被代理的（相对）地址，target_website.com/path
+        // 把relativePath去除掉当前代理的地址 https://xxx-com-p.xxx.com/ ，剩下的是被代理网站上的（相对）路径
         let startWithLs = [proxy_host_with_schema, proxy_host + "/", proxy_host]
 
         startWithLs.forEach(x => {
             if (relativePath_str.startsWith(x)) relativePath_str = relativePath_str.substring(x.length);
         });
-        // 如果是 /https://proxy.com/ 也去掉
+        // 如果是 /https://xxx-com-p.xxx.com/ 也去掉
         startWithLs.forEach(x => {
             x = "/" + x;
             if (relativePath_str.startsWith(x)) relativePath_str = relativePath_str.substring(x.length);
         });
 
 
-        // 修复： Original: /https://www.google.com/recaptcha/enterprise/reload?k=6LfwuyUTAAAAAOAmoS0fdqijC2PbbdH4kjq62Y1b
+        // 修复： Original: /https://www.google.com/recaptcha/enterprise/reload?k=...
         let enhancedStartRm = [original_website_host_with_schema.substring(0, original_website_host_with_schema.length - 1), original_website_host]
         // substring 去除掉末尾的 /
-        // 原因：relativePath_str 在去掉 /https://www.google.com/ 后变成了 recaptcha/enterprise/reload?k=...（没有前导 /）。
         enhancedStartRm.forEach(x => {
             x = "/" + x;
             if (relativePath_str.startsWith(x)) relativePath_str = relativePath_str.substring(x.length);
-            // console.log("Replacing: " + x + "   The replaced: " + relativePath_str);
         });
     } catch {
         //ignore
     }
     try {
-        // console.log("relativePath_str: " + relativePath_str + "; original_website_url_str: " + original_website_url_str);
         var absolutePath = new URL(relativePath_str, original_website_url_str).href; //获取绝对路径
         absolutePath = absolutePath.replaceAll(window.location.href, original_website_url_str); //可能是参数里面带了当前的链接，需要还原原来的链接防止403
         absolutePath = absolutePath.replaceAll(encodeURI(window.location.href), encodeURI(original_website_url_str));
@@ -172,14 +312,7 @@ function changeURL(relativePath) {
         absolutePath = absolutePath.replaceAll(encodeURI(proxy_host), encodeURI(original_website_host));
         absolutePath = absolutePath.replaceAll(encodeURIComponent(proxy_host), encodeURIComponent(original_website_host));
 
-        absolutePath = proxy_host_with_schema + absolutePath;
-
-
-
-        absolutePath = pathAfterAdd + absolutePath;
-
-
-
+        absolutePath = makeProxyUrl(absolutePath); //转换为对应目标的代理子域名 URL
 
         return absolutePath;
     } catch (e) {
@@ -189,10 +322,18 @@ function changeURL(relativePath) {
 }
 
 
-// change from https://proxy.com/https://target_website.com/a to https://target_website.com/a
+// change from https://target-com-p.xxx.com/a to https://target.com/a
 function getOriginalUrl(url) {
     if (url == null) return null;
-    if (url.startsWith(proxy_host_with_schema)) return url.substring(proxy_host_with_schema.length);
+    try {
+        var u = new URL(url);
+        if (u.hostname.endsWith("." + proxyBaseDomain)) {
+            var info = parseProxyLabel(u.hostname.split(".")[0]);
+            if (info) return info.protocol + "//" + info.host + u.pathname + u.search + u.hash;
+        }
+    } catch {
+        //相对路径等，原样返回
+    }
     return url;
 }
 
@@ -388,7 +529,7 @@ class ProxyLocation {
 
     set protocol(value) {
         original_website_url.protocol = value;
-        this.originalLocation.href = proxy_host_with_schema + original_website_url.href;
+        this.originalLocation.href = makeProxyUrl(original_website_url.href);
     }
 
     // 属性：获取和设置 host
@@ -398,7 +539,7 @@ class ProxyLocation {
 
     set host(value) {
         original_website_url.host = value;
-        this.originalLocation.href = proxy_host_with_schema + original_website_url.href;
+        this.originalLocation.href = makeProxyUrl(original_website_url.href);
     }
 
     // 属性：获取和设置 hostname
@@ -408,7 +549,7 @@ class ProxyLocation {
 
     set hostname(value) {
         original_website_url.hostname = value;
-        this.originalLocation.href = proxy_host_with_schema + original_website_url.href;
+        this.originalLocation.href = makeProxyUrl(original_website_url.href);
     }
 
     // 属性：获取和设置 port
@@ -418,7 +559,7 @@ class ProxyLocation {
 
     set port(value) {
         original_website_url.port = value;
-        this.originalLocation.href = proxy_host_with_schema + original_website_url.href;
+        this.originalLocation.href = makeProxyUrl(original_website_url.href);
     }
 
     // 属性：获取和设置 pathname
@@ -428,7 +569,7 @@ class ProxyLocation {
 
     set pathname(value) {
         original_website_url.pathname = value;
-        this.originalLocation.href = proxy_host_with_schema + original_website_url.href;
+        this.originalLocation.href = makeProxyUrl(original_website_url.href);
     }
 
     // 属性：获取和设置 search
@@ -438,7 +579,7 @@ class ProxyLocation {
 
     set search(value) {
         original_website_url.search = value;
-        this.originalLocation.href = proxy_host_with_schema + original_website_url.href;
+        this.originalLocation.href = makeProxyUrl(original_website_url.href);
     }
 
     // 属性：获取和设置 hash
@@ -448,7 +589,7 @@ class ProxyLocation {
 
     set hash(value) {
         original_website_url.hash = value;
-        this.originalLocation.href = proxy_host_with_schema + original_website_url.href;
+        this.originalLocation.href = makeProxyUrl(original_website_url.href);
     }
 
     // 属性：获取 origin
@@ -882,12 +1023,7 @@ function replaceContentPaths(content){
   // 这里写四个 \ 是因为 Server side 的文本也会把它当成转义符
   content = content.replaceAll(regex, (match) => {
     if (match.startsWith("http://www.w3.org/") || match.startsWith("https://www.w3.org/")) return match; // w3范式
-    
-    if (match.startsWith("http")) {
-      return proxy_host_with_schema + match;
-    } else {
-      return proxy_host + "/" + match;
-    }
+    return makeProxyUrl(match);
   });
 
 
@@ -1030,7 +1166,9 @@ const mainPage = `
       <br>
       1. 在上方输入框输入要访问的网址 / Type the website link above
       <br>
-      2.在代理网址后输入您要访问的网址 / Type the website link after the proxy website's link<br>
+      2. 或直接访问「目标host-p.${proxyBaseDomain}」，host 中的点换成连字符，原有连字符写成两个。<br>
+      Or visit "target-host-p.${proxyBaseDomain}" directly (dots become dashes, existing dashes are doubled).<br>
+      例如 / e.g. github.com → github-com-p.${proxyBaseDomain}<br>
   </li>
   <br>
   <li>若显示 400 Bad Request 错误，请清本网站Cookie / Please clear this website's cookie if it shows 400 Bad Request</li>
@@ -1059,11 +1197,27 @@ const mainPage = `
 
 
 <script>
+  function encodeHostToLabel(host) {
+      var hostname = host, port = "";
+      var i = host.lastIndexOf(":");
+      if (i !== -1) { hostname = host.substring(0, i); port = host.substring(i + 1); }
+      var label = hostname.split("-").join("--").split(".").join("-");
+      if (port !== "") label += "---" + port;
+      return label;
+  }
   function redirectToProxy(event) {
       event.preventDefault();
-      const targetUrl = document.getElementById('targetUrl').value.trim().toLowerCase();
-      const currentOrigin = window.location.origin;
-      window.open(currentOrigin + '/' + targetUrl, '_blank');
+      var targetUrl = document.getElementById('targetUrl').value.trim();
+      if (!/^https?:\\/\\//i.test(targetUrl)) targetUrl = "https://" + targetUrl;
+      try {
+          var u = new URL(targetUrl);
+          var host = u.hostname + (u.port !== "" ? ":" + u.port : "");
+          var suffix = (u.protocol === "http:") ? "${proxySuffixHttp}" : "${proxySuffixHttps}";
+          var proxyUrl = window.location.protocol + "//" + encodeHostToLabel(host) + suffix + ".${proxyBaseDomain}" + u.pathname + u.search + u.hash;
+          window.open(proxyUrl, '_blank');
+      } catch (e) {
+          alert("无效的网址 / Invalid URL: " + e.message);
+      }
   }
   function fillUrl(url) {
     document.getElementById('targetUrl').value = url;
@@ -1081,7 +1235,7 @@ const pwdPage = `
         <script>
             function setPassword() {
                 try {
-                    var cookieDomain = window.location.hostname;
+                    var cookieDomain = "${proxyBaseDomain}"; //密码 Cookie 种在裸域上，所有代理子域名共享
                     var password = document.getElementById('password').value;
                     var currentOrigin = window.location.origin;
                     var oneWeekLater = new Date();
@@ -1168,49 +1322,31 @@ async function handleRequest(request) {
     });
   }
 
-  //var siteOnly = url.pathname.substring(url.pathname.indexOf(str) + str.length);
+  // =======================================================================================
+  // 子域名模式：从当前 hostname 解析出目标网站
+  // =======================================================================================
+  const proxyInfo = parseProxyHostname(url.hostname);
 
-  var actualUrlStr = url.pathname.substring(url.pathname.indexOf(str) + str.length) + url.search + url.hash;
-  if (actualUrlStr == "") { //先返回引导界面
+  if (!proxyInfo) {
+    // 不是代理子域名：兼容旧的路径式访问（/https://target.com/...），自动跳转到新子域名；否则返回引导页
+    var legacyTarget = url.pathname.substring(1) + url.search + url.hash;
+    if (legacyTarget != "") {
+      try {
+        if (!legacyTarget.startsWith("http")) legacyTarget = "https://" + legacyTarget;
+        const legacyUrl = new URL(legacyTarget);
+        if (legacyUrl.hostname.includes(".")) {
+          return getRedirect(toProxyUrl(legacyUrl, url.protocol));
+        }
+      } catch { /* 忽略，返回引导页 */ }
+    }
     return getHTMLResponse(mainPage);
   }
 
-
-  try {
-    var test = actualUrlStr;
-    if (!test.startsWith("http")) {
-      test = "https://" + test;
-    }
-    var u = new URL(test);
-    if (!u.host.includes(".")) {
-      throw new Error();
-    }
-  }
-  catch { //可能是搜素引擎，比如proxy.com/https://www.duckduckgo.com/ 转到 proxy.com/?q=key
-    var lastVisit;
-    if (siteCookie != null && siteCookie != "") {
-      lastVisit = getCook(lastVisitProxyCookie, siteCookie);
-      console.log(lastVisit);
-      if (lastVisit != null && lastVisit != "") {
-        //(!lastVisit.startsWith("http"))?"https://":"" + 
-        //现在的actualUrlStr如果本来不带https:// 的话那么现在也不带，因为判断是否带protocol在后面
-        return getRedirect(thisProxyServerUrlHttps + lastVisit + "/" + actualUrlStr);
-      }
-    }
-    return getHTMLResponse("Something is wrong while trying to get your cookie: <br> siteCookie: " + siteCookie + "<br>" + "lastSite: " + lastVisit);
-  }
-
-
-  if (!actualUrlStr.startsWith("http") && !actualUrlStr.includes("://")) { //从www.xxx.com转到https://www.xxx.com
-    //actualUrlStr = "https://" + actualUrlStr;
-    return getRedirect(thisProxyServerUrlHttps + "https://" + actualUrlStr);
-  }
-
-  //if(!actualUrlStr.endsWith("/")) actualUrlStr += "/";
+  var actualUrlStr = proxyInfo.protocol + "//" + proxyInfo.host + url.pathname + url.search + url.hash;
   const actualUrl = new URL(actualUrlStr);
 
-  //check for upper case: proxy.com/https://ABCabc.dev
-  if (actualUrlStr != actualUrl.href) return getRedirect(thisProxyServerUrlHttps + actualUrl.href);
+  //URL 规范化（大小写、默认端口、路径点段等），跳转到规范的代理地址
+  if (actualUrlStr != actualUrl.href) return getRedirect(toProxyUrl(actualUrl, url.protocol));
 
 
 
@@ -1222,11 +1358,9 @@ async function handleRequest(request) {
   let clientHeaderWithChange = new Headers();
   //***代理发送数据的Header：修改部分header防止403 forbidden，要先修改，   因为添加Request之后header是只读的（***ChatGPT，未测试）
   request.headers.forEach((value, key) => {
-    var newValue = value.replaceAll(thisProxyServerUrlHttps + "http", "http");
-    //无论如何，https://proxy.com/ 都不应该作为https://proxy.com/https://original出现在header中，即使是在paramter里面，改为http也只会变为原先的URL
-    var newValue = newValue.replaceAll(thisProxyServerUrlHttps, `${actualUrl.protocol}//${actualUrl.origin}/`); // 这是最后带 / 的
-    var newValue = newValue.replaceAll(thisProxyServerUrlHttps.substring(0, thisProxyServerUrlHttps.length - 1), `${actualUrl.protocol}//${actualUrl.origin}`); // 这是最后不带 / 的
-    var newValue = newValue.replaceAll(thisProxyServerUrl_hostOnly, actualUrl.host); // 仅替换 host
+    //把 Header 中出现的任意代理子域名 URL（Referer / Origin 等）还原为真实目标地址，防止403
+    var newValue = restoreProxyUrlsInText(value);
+    newValue = newValue.replaceAll(thisProxyServerUrl_hostOnly, actualUrl.host); // 仅替换 host
     clientHeaderWithChange.set(key, newValue);
   });
 
@@ -1246,11 +1380,10 @@ async function handleRequest(request) {
       const bodyText = await new Response(body1).text();
 
       // 检查是否包含需要替换的内容
-      if (bodyText.includes(thisProxyServerUrlHttps) ||
+      if (bodyText.includes(proxyBaseDomain) ||
         bodyText.includes(thisProxyServerUrl_hostOnly)) {
-        // 包含需要替换的内容，进行替换
-        clientRequestBodyWithChange = bodyText
-          .replaceAll(thisProxyServerUrlHttps, actualUrlStr)
+        // 包含需要替换的内容，把代理子域名 URL 还原为真实目标地址
+        clientRequestBodyWithChange = restoreProxyUrlsInText(bodyText)
           .replaceAll(thisProxyServerUrl_hostOnly, actualUrl.host);
       } else {
         // 不包含需要替换的内容，使用原始 body
@@ -1298,7 +1431,7 @@ async function handleRequest(request) {
   if (response.status.toString().startsWith("3") && response.headers.get("Location") != null) {
     //console.log(base_url + response.headers.get("Location"))
     try {
-      return getRedirect(thisProxyServerUrlHttps + new URL(response.headers.get("Location"), actualUrlStr).href, response, actualUrl);
+      return getRedirect(toProxyUrl(new URL(response.headers.get("Location"), actualUrlStr), url.protocol), response, actualUrl);
     } catch {
       return getHTMLResponse(redirectError + "<br>the redirect url:" + response.headers.get("Location") + ";the url you are now at:" + actualUrlStr);
     }
@@ -1496,10 +1629,10 @@ async function handleRequest(request) {
         let regex = new RegExp(`(https?:\\/\\/[^\s'"]+)`, 'g');
         bd = bd.replaceAll(regex, (match) => {
           if (match.startsWith("http://www.w3.org/") || match.startsWith("https://www.w3.org/")) return match; // w3范式
-          if (match.startsWith("http")) {
-            return thisProxyServerUrlHttps + match;
-          } else {
-            return thisProxyServerUrl_hostOnly + "/" + match;
+          try {
+            return toProxyUrl(match, url.protocol);
+          } catch {
+            return match;
           }
         });
       }
@@ -1646,21 +1779,8 @@ function handleCookieHeader(modifiedResponse, isHTML, response, actualUrlStr, ac
     rawCookies.forEach(singleCookie => {
       let parts = singleCookie.split(';').map(part => part.trim());
 
-      // Modify Path
-      let pathIndex = parts.findIndex(part => part.toLowerCase().startsWith('path='));
-      let originalPath;
-      if (pathIndex !== -1) {
-        originalPath = parts[pathIndex].substring("path=".length);
-      }
-      let absolutePath = "/" + new URL(originalPath, actualUrlStr).href;
-
-      if (pathIndex !== -1) {
-        parts[pathIndex] = `Path=${absolutePath}`;
-      } else {
-        parts.push(`Path=${absolutePath}`);
-      }
-
-      // Modify Domain
+      // 子域名模式：URL 路径与目标网站一致，Path 保持原样即可；
+      // Domain 改写为当前代理子域名，不同目标网站的 Cookie 天然按子域名隔离
       let domainIndex = parts.findIndex(part => part.toLowerCase().startsWith('domain='));
       if (domainIndex !== -1) {
         parts[domainIndex] = `domain=${thisProxyServerUrl_hostOnly}`;
@@ -1674,9 +1794,6 @@ function handleCookieHeader(modifiedResponse, isHTML, response, actualUrlStr, ac
   }
 
   if (isHTML && response.status == 200) {
-    let cookieValue = lastVisitProxyCookie + "=" + actualUrl.origin + "; Path=/; Domain=" + thisProxyServerUrl_hostOnly;
-    headers.append("Set-Cookie", cookieValue);
-
     if (response.body && !hasProxyHintCook) {
       const expiryDate = new Date();
       expiryDate.setTime(expiryDate.getTime() + 24 * 60 * 60 * 1000);
@@ -1715,7 +1832,7 @@ function covToAbs_ServerSide(body, requestPathNow) {
             var relativePath = strReplace.substring(match[1].toString().length, strReplace.length - 1);
             if (!relativePath.startsWith("data:") && !relativePath.startsWith("mailto:") && !relativePath.startsWith("javascript:") && !relativePath.startsWith("chrome") && !relativePath.startsWith("edge")) {
               try {
-                var absolutePath = thisProxyServerUrlHttps + new URL(relativePath, requestPathNow).href;
+                var absolutePath = toProxyUrl(new URL(relativePath, requestPathNow), "https:");
                 //body = body.replace(strReplace, match[1].toString() + absolutePath + `"`);
                 original.push(strReplace);
                 target.push(match[1].toString() + absolutePath + `"`);
@@ -1799,3 +1916,6 @@ function nthIndex(str, pat, n) {
   }
   return i;
 }
+
+// 导出内部工具函数，便于本地单元测试（不影响 Worker 运行）
+export { encodeHostToLabel, decodeLabelToHost, parseProxyHostname, toProxyUrl, restoreProxyUrlsInText, httpRequestInjection, htmlCovPathInject, mainPage, pwdPage };
