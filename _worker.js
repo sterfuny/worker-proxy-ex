@@ -23,9 +23,9 @@ const replaceUrlObj = "__location__yproxy__";
 //          2) DNS 添加泛解析 *.xxx.com（以及裸域 xxx.com）指向 Worker
 //          3) Worker 绑定路由 *.xxx.com/* 和 xxx.com/*（证书需覆盖 *.xxx.com）
 // =======================================================================================
-const proxyBaseDomain = "xxx.com"; // TODO: 改成你自己的域名
+const proxyBaseDomain = "linelinkd.dpdns.org"; // TODO: 改成你自己的域名
 const proxySuffixHttps = "-p";
-const proxySuffixHttp = "-ph";
+const proxySuffixHttp = "-hp";
 
 var thisProxyServerUrlHttps;
 var thisProxyServerUrl_hostOnly;
