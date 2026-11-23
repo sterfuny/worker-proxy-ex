@@ -1363,6 +1363,11 @@ async function handleRequest(request) {
     newValue = newValue.replaceAll(thisProxyServerUrl_hostOnly, actualUrl.host); // 仅替换 host
     clientHeaderWithChange.set(key, newValue);
   });
+  // 上游统一请求未压缩内容：Workers 的 fetch 会自动解压 gzip/br，但不会解压 zstd；
+  // 若把浏览器的 Accept-Encoding（含 zstd）透传上游，压缩字节会被当成文本处理，
+  // 返回给浏览器时带着 content-encoding: zstd 的坏流，导致 ERR_CONNECTION_CLOSED / 页面无法渲染。
+  // 响应回浏览器时 Cloudflare 边缘会按需重新压缩，不影响传输体积。
+  clientHeaderWithChange.set("Accept-Encoding", "identity");
 
   // =======================================================================================
   // *-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-* 处理客户端发来的 Body *-*-*-*-*-*-*-*-*-*-*-*-*-*
@@ -1646,6 +1651,10 @@ async function handleRequest(request) {
 
       modifiedResponse = new Response(bd, response);
 
+      // 文本已被解码/改写，原响应的压缩与长度头不再匹配，必须移除
+      modifiedResponse.headers.delete("Content-Encoding");
+      modifiedResponse.headers.delete("Content-Length");
+
       // 文档编码
       modifiedResponse.headers.set("Content-Type", contentType.replace(/charset=([^\s;]+)/i, "charset=utf-8"));
     }
@@ -1918,4 +1927,4 @@ function nthIndex(str, pat, n) {
 }
 
 // 导出内部工具函数，便于本地单元测试（不影响 Worker 运行）
-export { encodeHostToLabel, decodeLabelToHost, parseProxyHostname, toProxyUrl, restoreProxyUrlsInText, httpRequestInjection, htmlCovPathInject, mainPage, pwdPage };
+export { proxyBaseDomain, proxySuffixHttps, proxySuffixHttp, password, encodeHostToLabel, decodeLabelToHost, parseProxyHostname, toProxyUrl, restoreProxyUrlsInText, httpRequestInjection, htmlCovPathInject, mainPage, pwdPage };
